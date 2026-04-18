@@ -1,0 +1,924 @@
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
+
+// ─── Drag & Drop Hook ────────────────────────────────────────────────────────
+function useDragDrop(onDrop) {
+  const drag = useRef(null);
+  const [over, setOver] = useState(null);
+
+  const onDragStart = useCallback((e, pid, tid) => {
+    drag.current = { pid, tid };
+    e.dataTransfer.effectAllowed = "move";
+    e.currentTarget.style.opacity = "0.4";
+  }, []);
+
+  const onDragEnd = useCallback((e) => {
+    e.currentTarget.style.opacity = "1";
+    setOver(null);
+    drag.current = null;
+  }, []);
+
+  const onDragOver = useCallback((e, pid, tid) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setOver({ pid, tid });
+  }, []);
+
+  const onDragLeave = useCallback(() => setOver(null), []);
+
+  const onDropEl = useCallback((e, pid, tid) => {
+    e.preventDefault();
+    setOver(null);
+    if (!drag.current) return;
+    if (drag.current.pid === pid && drag.current.tid === tid) return;
+    onDrop(drag.current, { pid, tid });
+    drag.current = null;
+  }, [onDrop]);
+
+  // For kanban column drop (no target task)
+  const onDropCol = useCallback((e, status) => {
+    e.preventDefault();
+    setOver(null);
+    if (!drag.current) return;
+    onDrop(drag.current, { status });
+    drag.current = null;
+  }, [onDrop]);
+
+  return { onDragStart, onDragEnd, onDragOver, onDragLeave, onDropEl, onDropCol, over };
+}
+
+// ─── Theme ───────────────────────────────────────────────────────────────────
+const mkT = (d) => ({
+  bg:          d ? "#151008" : "#F2EDE6",
+  surface:     d ? "#1E1509" : "#E8E0D4",
+  card:        d ? "#1A1208" : "#FFFFFF",
+  card2:       d ? "#221810" : "#FAF7F2",
+  border:      d ? "#3A2412" : "#D0C4B0",
+  accent:      d ? "#B87040" : "#8B5E3C",
+  accentLight: d ? "#D4904A" : "#B87040",
+  accentGold:  d ? "#E8C080" : "#A06830",
+  accentDim:   d ? "#6B4020" : "#D4B890",
+  textPrimary: d ? "#F0DEC0" : "#241808",
+  textMuted:   d ? "#7A6A5A" : "#8A7060",
+  textLight:   d ? "#4A3828" : "#C0B0A0",
+  headerBg:    "#151008",
+  overdue:     d ? "#C04040" : "#C03030",
+  overdueB:    d ? "#3A1010" : "#FDEAEA",
+  toast:       d ? "#2A1A08" : "#FFFFFF",
+  shadow:      d ? "rgba(0,0,0,0.5)" : "rgba(80,40,10,0.12)",
+  d,
+  statusC: {
+    "A fazer":      { bg: d?"#3A2010":"#E8D8C8", text: d?"#C09070":"#7A5030", dot:"#A07050" },
+    "Em andamento": { bg: d?"#5C3010":"#F0D8B0", text: d?"#D4904A":"#8B5020", dot:"#C47820" },
+    "Concluído":    { bg: d?"#1A3820":"#C8E4C8", text: d?"#60B060":"#2A6030", dot:"#40A040" },
+  },
+  priority: { Alta:"#C03030", Média:"#B07820", Baixa:"#308050" },
+  tagBg:   d?["#3B2510","#1E2A18","#182030","#2A1830","#182A20","#2A1E10"]:["#E0D0C0","#D0D8B8","#B8D0DC","#D0B8DC","#B8DCC8","#DCC8A0"],
+  tagText: d?["#D4904A","#90B850","#50B0D0","#B050D0","#50B080","#C09040"]:["#6B3E20","#4A6020","#184860","#581860","#185840","#584010"],
+});
+
+const TAGS_DEF    = ["Design","Dev","Marketing","Conteúdo","Cliente","Reunião","Urgente"];
+const MEMBERS_DEF = ["Ana","Bruno","Carol","Diego","Elena"];
+const BTYPES      = ["Ato","Cena","Diálogo","Narração"];
+const STATUSES    = ["A fazer","Em andamento","Concluído"];
+const PRIORITIES  = ["Alta","Média","Baixa"];
+const AV_COLORS   = [["#3B2510","#D4904A"],["#182030","#50B0D0"],["#1E2A18","#90B850"],["#2A1830","#B050D0"],["#182A20","#50B080"],["#2A1E10","#C09040"]];
+const MONTH_NAMES = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
+
+const todayD = new Date(); todayD.setHours(0,0,0,0);
+const iso    = (off=0) => { const d=new Date(todayD); d.setDate(d.getDate()+off); return d.toISOString().split("T")[0]; };
+const fmtDate= d => d ? new Date(d+"T00:00:00").toLocaleDateString("pt-BR",{day:"2-digit",month:"short"}) : "—";
+const isOD   = d => d && new Date(d+"T00:00:00") < todayD;
+const initials=n=>n.trim().split(" ").slice(0,2).map(w=>w[0]).join("").toUpperCase();
+const tsNow  = ()=>new Date().toLocaleString("pt-BR",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"});
+
+const FIELD_LABELS = { status:"Status", priority:"Prioridade", due:"Prazo", owner:"Responsável" };
+const mkHistory = (field, oldVal, newVal, author="Sistema") => ({
+  id: nid++,
+  field,
+  oldVal: oldVal||"—",
+  newVal: newVal||"—",
+  author,
+  ts: tsNow(),
+});
+let nid = 600;
+
+const INIT = [
+  { id:1, name:"Website Redesign", desc:"Redesign completo do site institucional.", collapsed:false, tasks:[
+    { id:101, title:"Wireframes mobile",      status:"Concluído",    priority:"Alta",  due:iso(-10), owner:"Ana",   tags:["Design"],           script:[], links:[], comments:[], createdAt:iso(-20) },
+    { id:102, title:"Desenvolvimento front-end",status:"Em andamento",priority:"Alta",  due:iso(8),   owner:"Bruno", tags:["Dev"],              script:[], links:[], comments:[], createdAt:iso(-5)  },
+    { id:103, title:"Testes de usabilidade",  status:"A fazer",      priority:"Média", due:iso(-2),  owner:"Carol", tags:["Design","Cliente"],  script:[], links:[], comments:[], createdAt:iso(-3)  },
+  ]},
+  { id:2, name:"Campanha Lançamento", desc:"Campanha de marketing para o novo produto.", collapsed:false, tasks:[
+    { id:201, title:"Copy e textos",           status:"A fazer",   priority:"Média", due:iso(5),  owner:"Elena", tags:["Conteúdo","Marketing"], script:[], links:[], comments:[], createdAt:iso(-2) },
+    { id:202, title:"Artes redes sociais",     status:"Concluído", priority:"Baixa", due:iso(-2), owner:"Ana",   tags:["Design"],              script:[], links:[], comments:[], createdAt:iso(-8) },
+  ]},
+];
+
+// ─── Storage helpers ─────────────────────────────────────────────────────────
+const STORE_KEY = "mktjoe_v7";
+const saveStore = (data) => { try { window.storage?.set(STORE_KEY, JSON.stringify(data)); } catch{} };
+const loadStore = async () => {
+  try {
+    const r = await window.storage?.get(STORE_KEY);
+    if (r?.value) return JSON.parse(r.value);
+  } catch{}
+  return null;
+};
+
+// ─── Icons ───────────────────────────────────────────────────────────────────
+const Ic = {
+  Task:    ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="2" stroke={c} strokeWidth="1.2"/><path d="M7 12L10 16L17 8" stroke={c} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+  Project: ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M3 8L3 20L21 20L21 8Z" stroke={c} strokeWidth="1.2" strokeLinejoin="round"/><path d="M3 8L8 8L10 4L21 4L21 8" stroke={c} strokeWidth="1.2" strokeLinejoin="round"/><line x1="7" y1="13" x2="17" y2="13" stroke={c} strokeWidth="0.9" opacity="0.5"/><line x1="7" y1="16" x2="13" y2="16" stroke={c} strokeWidth="0.9" opacity="0.5"/></svg>,
+  Script:  ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><rect x="4" y="2" width="16" height="20" rx="2" stroke={c} strokeWidth="1.2"/><line x1="8" y1="7" x2="16" y2="7" stroke={c} strokeWidth="1.2" strokeLinecap="round"/><line x1="8" y1="11" x2="16" y2="11" stroke={c} strokeWidth="0.9" strokeLinecap="round" opacity="0.6"/><line x1="8" y1="15" x2="16" y2="15" stroke={c} strokeWidth="0.9" strokeLinecap="round" opacity="0.6"/><line x1="8" y1="19" x2="13" y2="19" stroke={c} strokeWidth="0.9" strokeLinecap="round" opacity="0.6"/></svg>,
+  Link:    ({c,ca,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><line x1="8" y1="3" x2="8" y2="8" stroke={c} strokeWidth="2.2" strokeLinecap="round"/><line x1="16" y1="3" x2="16" y2="8" stroke={c} strokeWidth="2.2" strokeLinecap="round"/><path d="M4 8L4 16Q4 19 7 19L10 19L10 22L14 22L14 19L17 19Q20 19 20 16L20 8Z" stroke={c} strokeWidth="1.2" strokeLinejoin="round"/><path d="M13 11L11 14L13 14L11 18L15 13L13 13Z" fill={ca}/></svg>,
+  Dash:    ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><rect x="3" y="10" width="5" height="11" rx="1" stroke={c} strokeWidth="1.2"/><rect x="10" y="6" width="5" height="15" rx="1" stroke={c} strokeWidth="1.2"/><rect x="17" y="3" width="5" height="18" rx="1" stroke={c} strokeWidth="1.2"/></svg>,
+  Theme:   ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M12 2A10 10 0 0 1 12 22A6 6 0 0 0 12 2Z" fill={c} opacity="0.5"/><circle cx="12" cy="12" r="10" stroke={c} strokeWidth="1.2"/><line x1="12" y1="1" x2="12" y2="3" stroke={c} strokeWidth="1.2" strokeLinecap="round"/><line x1="12" y1="21" x2="12" y2="23" stroke={c} strokeWidth="1.2" strokeLinecap="round"/><line x1="1" y1="12" x2="3" y2="12" stroke={c} strokeWidth="1.2" strokeLinecap="round"/><line x1="21" y1="12" x2="23" y2="12" stroke={c} strokeWidth="1.2" strokeLinecap="round"/></svg>,
+  Members: ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><circle cx="9" cy="7" r="4" stroke={c} strokeWidth="1.2"/><path d="M2 20C2 16 16 16 16 20" stroke={c} strokeWidth="1.2" strokeLinecap="round"/><circle cx="18" cy="8" r="3" stroke={c} strokeWidth="1.2"/><path d="M16 20C16 17 22 17 22 20" stroke={c} strokeWidth="1.2" strokeLinecap="round"/></svg>,
+  Tag:     ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M3 3L12 3L21 12L12 21L3 12Z" stroke={c} strokeWidth="1.2" strokeLinejoin="round"/><circle cx="8" cy="8" r="1.5" fill={c}/></svg>,
+  Kanban:  ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><rect x="2" y="3" width="6" height="18" rx="1" stroke={c} strokeWidth="1.2"/><rect x="10" y="3" width="6" height="12" rx="1" stroke={c} strokeWidth="1.2"/><rect x="18" y="3" width="4" height="8" rx="1" stroke={c} strokeWidth="1.2"/></svg>,
+  List:    ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><line x1="4" y1="6" x2="20" y2="6" stroke={c} strokeWidth="1.2" strokeLinecap="round"/><line x1="4" y1="12" x2="20" y2="12" stroke={c} strokeWidth="1.2" strokeLinecap="round"/><line x1="4" y1="18" x2="20" y2="18" stroke={c} strokeWidth="1.2" strokeLinecap="round"/></svg>,
+  Cal:     ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="18" rx="2" stroke={c} strokeWidth="1.2"/><line x1="3" y1="9" x2="21" y2="9" stroke={c} strokeWidth="1.2"/><line x1="8" y1="2" x2="8" y2="6" stroke={c} strokeWidth="1.2" strokeLinecap="round"/><line x1="16" y1="2" x2="16" y2="6" stroke={c} strokeWidth="1.2" strokeLinecap="round"/><circle cx="12" cy="15" r="1.5" fill={c} opacity="0.6"/></svg>,
+  Search:  ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><circle cx="10" cy="10" r="7" stroke={c} strokeWidth="1.2"/><line x1="15" y1="15" x2="21" y2="21" stroke={c} strokeWidth="1.4" strokeLinecap="round"/></svg>,
+  Alert:   ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M12 3L22 21H2Z" stroke={c} strokeWidth="1.2" strokeLinejoin="round"/><line x1="12" y1="10" x2="12" y2="15" stroke={c} strokeWidth="1.2" strokeLinecap="round"/><circle cx="12" cy="18" r="0.8" fill={c}/></svg>,
+  Chat:    ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M4 4H20V16H13L8 20V16H4Z" stroke={c} strokeWidth="1.2" strokeLinejoin="round"/></svg>,
+  Send:    ({c,s=16})=><svg width={s} height={s} viewBox="0 0 24 24" fill="none"><path d="M22 2L11 13" stroke={c} strokeWidth="1.2" strokeLinecap="round"/><path d="M22 2L15 22L11 13L2 9Z" stroke={c} strokeWidth="1.2" strokeLinejoin="round"/></svg>,
+  Chevron: ({c,up,right})=><svg width={12} height={12} viewBox="0 0 12 12" fill="none" style={{transform:up?"rotate(180deg)":right?"rotate(-90deg)":"rotate(0)",transition:"transform .2s",flexShrink:0}}><path d="M2 4L6 8L10 4" stroke={c} strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+  Plus:    ({c,s=14})=><svg width={s} height={s} viewBox="0 0 14 14" fill="none"><line x1="7" y1="2" x2="7" y2="12" stroke={c} strokeWidth="1.4" strokeLinecap="round"/><line x1="2" y1="7" x2="12" y2="7" stroke={c} strokeWidth="1.4" strokeLinecap="round"/></svg>,
+  Edit:    ({c,s=14})=><svg width={s} height={s} viewBox="0 0 14 14" fill="none"><path d="M9 2L12 5L5 12L2 12L2 9Z" stroke={c} strokeWidth="1.2" strokeLinejoin="round"/><line x1="8" y1="3" x2="11" y2="6" stroke={c} strokeWidth="1.2"/></svg>,
+  X:       ({c,s=12})=><svg width={s} height={s} viewBox="0 0 12 12" fill="none"><line x1="2" y1="2" x2="10" y2="10" stroke={c} strokeWidth="1.4" strokeLinecap="round"/><line x1="10" y1="2" x2="2" y2="10" stroke={c} strokeWidth="1.4" strokeLinecap="round"/></svg>,
+  Check:   ({c,s=14})=><svg width={s} height={s} viewBox="0 0 14 14" fill="none"><path d="M2 7L5 11L12 3" stroke={c} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+  Arr:     ({c,left,s=14})=><svg width={s} height={s} viewBox="0 0 14 14" fill="none" style={{transform:left?"rotate(180deg)":"none"}}><path d="M5 2L10 7L5 12" stroke={c} strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>,
+};
+
+const Avatar = ({name,idx,size=28}) => {
+  const [bg,fg]=AV_COLORS[Math.abs(idx)%AV_COLORS.length];
+  return <div style={{width:size,height:size,borderRadius:"50%",background:bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:size*0.34,fontWeight:500,color:fg,flexShrink:0}}>{initials(name)}</div>;
+};
+
+function Toast({msg,C}) {
+  return msg ? <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",background:C.toast,border:`0.5px solid ${C.border}`,borderRadius:4,padding:"10px 20px",fontSize:11,color:C.accentLight,letterSpacing:2,zIndex:999,display:"flex",alignItems:"center",gap:8,boxShadow:`0 4px 20px ${C.shadow}`}}><Ic.Check c={C.accentLight} s={12}/>{msg}</div> : null;
+}
+
+function InlineSelect({value,options,onChange,renderOption,C}) {
+  const [open,setOpen]=useState(false);
+  const ref=useRef();
+  useEffect(()=>{ const fn=e=>{ if(ref.current&&!ref.current.contains(e.target)) setOpen(false); }; document.addEventListener("mousedown",fn); return()=>document.removeEventListener("mousedown",fn); },[]);
+  return (
+    <div ref={ref} style={{position:"relative",display:"inline-block"}}>
+      <div onClick={e=>{e.stopPropagation();setOpen(o=>!o);}} style={{cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+        {renderOption(value)}<Ic.Chevron c={C.textLight} up={open}/>
+      </div>
+      {open&&<div style={{position:"absolute",top:"calc(100% + 4px)",left:0,background:C.card,border:`0.5px solid ${C.border}`,borderRadius:4,zIndex:50,minWidth:140,boxShadow:`0 4px 16px ${C.shadow}`}}>
+        {options.map(o=><div key={o} onClick={e=>{e.stopPropagation();onChange(o);setOpen(false);}} style={{padding:"8px 12px",cursor:"pointer",fontSize:12,color:C.textPrimary,display:"flex",alignItems:"center",justifyContent:"space-between",borderBottom:`0.5px solid ${C.border}`}}>
+          {renderOption(o)}{value===o&&<Ic.Check c={C.accentLight} s={10}/>}
+        </div>)}
+      </div>}
+    </div>
+  );
+}
+
+// ─── Calendar View ───────────────────────────────────────────────────────────
+function CalendarView({allTasks,C,onOpenTask,projects}) {
+  const [cal,setCal]=useState(()=>{ const d=new Date(todayD); return {y:d.getFullYear(),m:d.getMonth()}; });
+  const firstDay=new Date(cal.y,cal.m,1).getDay();
+  const daysInMonth=new Date(cal.y,cal.m+1,0).getDate();
+  const cells=Array.from({length:Math.ceil((firstDay+daysInMonth)/7)*7},(_,i)=>{
+    const day=i-firstDay+1;
+    return day>=1&&day<=daysInMonth ? day : null;
+  });
+  const tasksForDay=day=>{
+    const ds=`${cal.y}-${String(cal.m+1).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+    return allTasks.filter(t=>t.due===ds);
+  };
+  const todayNum=todayD.getFullYear()===cal.y&&todayD.getMonth()===cal.m?todayD.getDate():null;
+
+  return (
+    <div style={{padding:"0 24px 24px"}}>
+      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+        <button onClick={()=>setCal(c=>{ const d=new Date(c.y,c.m-1); return {y:d.getFullYear(),m:d.getMonth()}; })} style={{background:"none",border:`0.5px solid ${C.border}`,borderRadius:3,cursor:"pointer",padding:"4px 8px",color:C.textMuted}}><Ic.Arr c={C.textMuted} left s={12}/></button>
+        <span style={{fontSize:13,fontWeight:500,color:C.accentLight,letterSpacing:1,minWidth:100,textAlign:"center"}}>{MONTH_NAMES[cal.m]} {cal.y}</span>
+        <button onClick={()=>setCal(c=>{ const d=new Date(c.y,c.m+1); return {y:d.getFullYear(),m:d.getMonth()}; })} style={{background:"none",border:`0.5px solid ${C.border}`,borderRadius:3,cursor:"pointer",padding:"4px 8px",color:C.textMuted}}><Ic.Arr c={C.textMuted} s={12}/></button>
+        <button onClick={()=>setCal({y:todayD.getFullYear(),m:todayD.getMonth()})} style={{marginLeft:"auto",background:"none",border:`0.5px solid ${C.border}`,borderRadius:3,cursor:"pointer",padding:"4px 10px",fontSize:10,color:C.textMuted,letterSpacing:1}}>HOJE</button>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:1,background:C.border,borderRadius:4,overflow:"hidden"}}>
+        {["Dom","Seg","Ter","Qua","Qui","Sex","Sáb"].map(d=>(
+          <div key={d} style={{background:C.card2,padding:"6px 4px",textAlign:"center",fontSize:9,color:C.textMuted,letterSpacing:1,fontWeight:500}}>{d.toUpperCase()}</div>
+        ))}
+        {cells.map((day,i)=>{
+          const tasks=day?tasksForDay(day):[];
+          const isToday=day===todayNum;
+          return (
+            <div key={i} style={{background:isToday?C.accentDim:C.card,minHeight:72,padding:"6px 6px 4px",position:"relative"}}>
+              {day&&<div style={{fontSize:10,fontWeight:isToday?600:400,color:isToday?C.accentLight:C.textMuted,marginBottom:4,textAlign:"right"}}>{day}</div>}
+              {tasks.slice(0,3).map(t=>{
+                const sc=C.statusC[t.status];
+                const od=isOD(t.due)&&t.status!=="Concluído";
+                return (
+                  <div key={t.id} onClick={()=>{ const pr=projects.find(p=>p.tasks.find(tk=>tk.id===t.id)); if(pr) onOpenTask(t,pr.id); }} style={{background:od?C.overdueB:sc.bg,borderLeft:`2px solid ${od?C.overdue:sc.dot}`,padding:"2px 5px",borderRadius:2,marginBottom:3,cursor:"pointer",overflow:"hidden"}}>
+                    <div style={{fontSize:9,color:od?C.overdue:sc.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",letterSpacing:.3}}>{t.title}</div>
+                  </div>
+                );
+              })}
+              {tasks.length>3&&<div style={{fontSize:8,color:C.textLight,letterSpacing:1}}>+{tasks.length-3}</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Main App ────────────────────────────────────────────────────────────────
+export default function App() {
+  const [dark,setDark]           = useState(false);
+  const C = useMemo(()=>mkT(dark),[dark]);
+  const [projects,setProjects]   = useState(INIT);
+  const [tags,setTags]           = useState(TAGS_DEF);
+  const [members,setMembers]     = useState(MEMBERS_DEF);
+  const [loaded,setLoaded]       = useState(false);
+  const [mainTab,setMainTab]     = useState("tarefas");
+  const [view,setView]           = useState("list");
+  const [dashRange,setDashRange] = useState("semanal");
+  const [panel,setPanel]         = useState(null);
+  const [panelTask,setPanelTask] = useState(null);
+  const [panelPid,setPanelPid]   = useState(null);
+  const [taskTab,setTaskTab]     = useState("details");
+  const [commentText,setCommentText]=useState("");
+  const [commentAuthor,setCommentAuthor]=useState("");
+  const [addingProj,setAddingProj]=useState(false);
+  const [newProj,setNewProj]     = useState({name:"",desc:""});
+  const [search,setSearch]       = useState("");
+  const [fStatus,setFStatus]     = useState("Todos");
+  const [fPriority,setFPriority] = useState("Todos");
+  const [fMember,setFMember]     = useState("Todos");
+  const [toast,setToast]         = useState("");
+  const [editingTag,setEditingTag]=useState(null);
+  const [editingMember,setEditingMember]=useState(null);
+  const [newTagName,setNewTagName]=useState("");
+  const [newMemberName,setNewMemberName]=useState("");
+  const [modal,setModal]         = useState(null);
+  const [modalForm,setModalForm] = useState({});
+  const [saving,setSaving]       = useState(false);
+
+  const handleDrop = useCallback((from, to) => {
+    setProjects(prev => {
+      const ps = prev.map(p => ({ ...p, tasks: [...p.tasks] }));
+      // Find source
+      const srcProj = ps.find(p => p.id === from.pid);
+      if (!srcProj) return prev;
+      const srcIdx = srcProj.tasks.findIndex(t => t.id === from.tid);
+      if (srcIdx === -1) return prev;
+      const [task] = srcProj.tasks.splice(srcIdx, 1);
+
+      // Kanban status change (drop on column)
+      if (to.status !== undefined) {
+        task.status = to.status;
+        srcProj.tasks.push(task);
+        return ps;
+      }
+
+      // List reorder: drop on target task
+      const dstProj = ps.find(p => p.id === to.pid);
+      if (!dstProj) return prev;
+      const dstIdx = dstProj.tasks.findIndex(t => t.id === to.tid);
+      if (dstIdx === -1) { dstProj.tasks.push(task); }
+      else { dstProj.tasks.splice(dstIdx, 0, task); }
+      return ps;
+    });
+  }, []);
+
+  const dnd = useDragDrop(handleDrop);
+
+  // ── Load from storage ──
+  useEffect(()=>{
+    loadStore().then(data=>{
+      if(data){ setProjects(data.projects||INIT); setTags(data.tags||TAGS_DEF); setMembers(data.members||MEMBERS_DEF); setDark(data.dark||false); }
+      setLoaded(true);
+    });
+  },[]);
+
+  // ── Auto-save ──
+  useEffect(()=>{
+    if(!loaded) return;
+    setSaving(true);
+    const t=setTimeout(()=>{ saveStore({projects,tags,members,dark}); setSaving(false); },800);
+    return()=>clearTimeout(t);
+  },[projects,tags,members,dark,loaded]);
+
+  const showToast = msg=>{ setToast(msg); setTimeout(()=>setToast(""),2200); };
+  const allTasks  = useMemo(()=>projects.flatMap(p=>p.tasks.map(t=>({...t,pname:p.name,pid:p.id}))),[projects]);
+  const ownerIdx  = n=>members.indexOf(n);
+
+  const filtered = useMemo(()=>projects.map(pr=>({
+    ...pr, tasks:pr.tasks.filter(t=>{
+      if(search&&!t.title.toLowerCase().includes(search.toLowerCase())) return false;
+      if(fStatus!=="Todos"&&t.status!==fStatus) return false;
+      if(fPriority!=="Todos"&&t.priority!==fPriority) return false;
+      if(fMember!=="Todos"&&t.owner!==fMember) return false;
+      return true;
+    })
+  })),[projects,search,fStatus,fPriority,fMember]);
+
+  const hasFilters=search||fStatus!=="Todos"||fPriority!=="Todos"||fMember!=="Todos";
+  const stats={total:allTasks.length,done:allTasks.filter(t=>t.status==="Concluído").length,prog:allTasks.filter(t=>t.status==="Em andamento").length,overdue:allTasks.filter(t=>isOD(t.due)&&t.status!=="Concluído").length};
+
+  const rangeStart=useMemo(()=>{ const d=new Date(todayD); d.setDate(d.getDate()-(dashRange==="semanal"?7:30)); return d; },[dashRange]);
+  const dashTasks =useMemo(()=>allTasks.filter(t=>t.createdAt&&new Date(t.createdAt+"T00:00:00")>=rangeStart),[allTasks,rangeStart]);
+  const weekBar   =useMemo(()=>{ const days=["Dom","Seg","Ter","Qua","Qui","Sex","Sáb"]; return Array.from({length:7},(_,i)=>{ const d=new Date(todayD); d.setDate(d.getDate()-6+i); const ds=d.toISOString().split("T")[0]; return {label:days[d.getDay()],value:allTasks.filter(t=>t.createdAt===ds).length}; }); },[allTasks]);
+  const monthBar  =useMemo(()=>Array.from({length:4},(_,i)=>{ const s=new Date(todayD); s.setDate(s.getDate()-27+i*7); const e=new Date(s); e.setDate(e.getDate()+6); return {label:`${s.getDate()}/${s.getMonth()+1}`,value:allTasks.filter(t=>{ if(!t.createdAt) return false; const d=new Date(t.createdAt+"T00:00:00"); return d>=s&&d<=e; }).length}; }),[allTasks]);
+
+  // ── Panel helpers ──
+  const openPanel   = (t,pid)=>{ setPanelTask({...t,comments:t.comments||[]}); setPanelPid(pid); setTaskTab("details"); setCommentText(""); setPanel("task"); };
+  const openNewPanel= pid=>{ setPanelTask({projectId:pid,title:"",status:"A fazer",priority:"Média",due:"",owner:"",tags:[],script:[],links:[],comments:[],createdAt:iso()}); setPanelPid(pid); setTaskTab("details"); setPanel("task"); };
+  const savePanel = () => {
+    if(!panelTask?.title?.trim()) return;
+    setProjects(p=>p.map(pr=>{
+      if(pr.id!==panelPid) return pr;
+      if(!panelTask.id) return {...pr,tasks:[...pr.tasks,{...panelTask,id:nid++,history:[{id:nid++,field:"created",oldVal:"",newVal:panelTask.title,author:"Usuário",ts:tsNow()}]}]};
+      const orig = pr.tasks.find(t=>t.id===panelTask.id);
+      const tracked = ["status","priority","due","owner"];
+      const newHistory = [...(panelTask.history||[])];
+      if(orig) tracked.forEach(f=>{ if(orig[f]!==panelTask[f]) newHistory.push(mkHistory(f,orig[f],panelTask[f],"Usuário")); });
+      return {...pr,tasks:pr.tasks.map(t=>t.id===panelTask.id?{...panelTask,history:newHistory}:t)};
+    }));
+    showToast("TAREFA SALVA"); setPanel(null);
+  };
+
+  const updInline=(pid,tid,f,v)=>{
+    setProjects(p=>p.map(pr=>pr.id===pid?{...pr,tasks:pr.tasks.map(t=>{
+      if(t.id!==tid) return t;
+      const entry = mkHistory(f, t[f], v, "Usuário");
+      return {...t,[f]:v, history:[...(t.history||[]),entry]};
+    })}:pr));
+    if(panelTask?.id===tid) setPanelTask(pt=>({...pt,[f]:v}));
+  };
+  const delTask  =(pid,tid)=>{ setProjects(p=>p.map(pr=>pr.id===pid?{...pr,tasks:pr.tasks.filter(t=>t.id!==tid)}:pr)); if(panel==="task"&&panelTask?.id===tid) setPanel(null); showToast("TAREFA REMOVIDA"); };
+  const toggleC  = id=>setProjects(p=>p.map(pr=>pr.id===id?{...pr,collapsed:!pr.collapsed}:pr));
+  const delProj  = pid=>{ setProjects(p=>p.filter(pr=>pr.id!==pid)); showToast("PROJETO REMOVIDO"); };
+  const addProj  = ()=>{ if(!newProj.name.trim()) return; setProjects(p=>[...p,{id:nid++,name:newProj.name.trim(),desc:newProj.desc.trim(),collapsed:false,tasks:[]}]); setNewProj({name:"",desc:""}); setAddingProj(false); showToast("PROJETO CRIADO"); };
+  const openEditP= (pr,e)=>{ e.stopPropagation(); setModalForm({id:pr.id,name:pr.name,desc:pr.desc||""}); setModal("project"); };
+  const saveProj = ()=>{ if(!modalForm.name?.trim()) return; setProjects(p=>p.map(pr=>pr.id===modalForm.id?{...pr,name:modalForm.name,desc:modalForm.desc}:pr)); setModal(null); showToast("PROJETO ATUALIZADO"); };
+  const togTag   = tag=>setPanelTask(f=>({...f,tags:(f.tags||[]).includes(tag)?f.tags.filter(t=>t!==tag):[...(f.tags||[]),tag]}));
+
+  const addComment=()=>{
+    if(!commentText.trim()) return;
+    const c={id:nid++,author:commentAuthor||"Anônimo",text:commentText.trim(),ts:tsNow()};
+    setPanelTask(f=>({...f,comments:[...(f.comments||[]),c]}));
+    setCommentText("");
+  };
+  const delComment=id=>setPanelTask(f=>({...f,comments:f.comments.filter(c=>c.id!==id)}));
+
+  const addSub    = ()=>{ if(!newSubText.trim()) return; setPanelTask(f=>({...f,subtasks:[...(f.subtasks||[]),{id:nid++,text:newSubText.trim(),done:false}]})); setNewSubText(""); };
+  const toggleSub = (sid)=>setPanelTask(f=>({...f,subtasks:f.subtasks.map(sb=>sb.id===sid?{...sb,done:!sb.done}:sb)}));
+  const delSub    = (sid)=>setPanelTask(f=>({...f,subtasks:f.subtasks.filter(sb=>sb.id!==sid)}));
+  const renameSub = (sid,text)=>setPanelTask(f=>({...f,subtasks:f.subtasks.map(sb=>sb.id===sid?{...sb,text}:sb)}));
+  const updBlock  = (id,k,v)=>setPanelTask(f=>({...f,script:f.script.map(b=>b.id===id?{...b,[k]:v}:b)}));
+  const delBlock  = id=>setPanelTask(f=>({...f,script:f.script.filter(b=>b.id!==id)}));
+  const moveBlock = (id,dir)=>setPanelTask(f=>{ const sc=[...f.script],i=sc.findIndex(b=>b.id===id),j=i+dir; if(j<0||j>=sc.length) return f; [sc[i],sc[j]]=[sc[j],sc[i]]; return {...f,script:sc}; });
+  const addLink   = ()=>setPanelTask(f=>({...f,links:[...(f.links||[]),{id:nid++,url:"",title:"",desc:""}]}));
+  const updLink   = (id,k,v)=>setPanelTask(f=>({...f,links:f.links.map(l=>l.id===id?{...l,[k]:v}:l)}));
+  const delLink   = id=>setPanelTask(f=>({...f,links:f.links.filter(l=>l.id!==id)}));
+
+  const saveTagEdit  =()=>{ if(!newTagName.trim()) return; const old=tags[editingTag]; setTags(t=>t.map((tg,i)=>i===editingTag?newTagName.trim():tg)); setProjects(p=>p.map(pr=>({...pr,tasks:pr.tasks.map(t=>({...t,tags:(t.tags||[]).map(tg=>tg===old?newTagName.trim():tg)}))})));setEditingTag(null);setNewTagName("");showToast("ETIQUETA ATUALIZADA"); };
+  const deleteTag    = idx=>{ const old=tags[idx]; setTags(t=>t.filter((_,i)=>i!==idx)); setProjects(p=>p.map(pr=>({...pr,tasks:pr.tasks.map(t=>({...t,tags:(t.tags||[]).filter(tg=>tg!==old)}))}))); showToast("ETIQUETA REMOVIDA"); };
+  const addTag       = ()=>{ const n=newTagName.trim(); if(!n||tags.includes(n)) return; setTags(t=>[...t,n]); setNewTagName(""); showToast("ETIQUETA CRIADA"); };
+  const saveMemberEdit=()=>{ if(!newMemberName.trim()) return; const old=members[editingMember]; setMembers(m=>m.map((mb,i)=>i===editingMember?newMemberName.trim():mb)); setProjects(p=>p.map(pr=>({...pr,tasks:pr.tasks.map(t=>({...t,owner:t.owner===old?newMemberName.trim():t.owner}))}))); setEditingMember(null);setNewMemberName("");showToast("MEMBRO ATUALIZADO"); };
+  const deleteMember = idx=>{ const old=members[idx]; setMembers(m=>m.filter((_,i)=>i!==idx)); setProjects(p=>p.map(pr=>({...pr,tasks:pr.tasks.map(t=>({...t,owner:t.owner===old?"":t.owner}))}))); showToast("MEMBRO REMOVIDO"); };
+  const addMember    = ()=>{ const n=newMemberName.trim(); if(!n||members.includes(n)) return; setMembers(m=>[...m,n]); setNewMemberName(""); showToast("MEMBRO ADICIONADO"); };
+
+  // ── Styles ──
+  const inp  ={width:"100%",padding:"8px 10px",borderRadius:3,border:`0.5px solid ${C.border}`,fontSize:13,color:C.textPrimary,background:C.surface,boxSizing:"border-box",outline:"none"};
+  const btn  =(p,sm)=>({padding:sm?"5px 12px":"8px 18px",borderRadius:3,fontSize:sm?11:13,cursor:"pointer",fontWeight:500,background:p?C.accent:"transparent",color:p?"#F0DEC0":C.textMuted,border:p?"none":`0.5px solid ${C.border}`,display:"flex",alignItems:"center",gap:5});
+  const hBtn ={padding:"4px 12px",borderRadius:3,fontSize:10,cursor:"pointer",fontWeight:500,background:"transparent",color:C.accentLight,border:`0.5px solid ${C.accentLight}`,letterSpacing:1,display:"flex",alignItems:"center",gap:5};
+  const mTab =a=>({padding:"10px 14px",cursor:"pointer",fontWeight:a?500:400,fontSize:12,color:a?C.accentLight:C.textMuted,borderBottom:a?`2px solid ${C.accentLight}`:"2px solid transparent",background:"none",border:"none",borderBottomWidth:2,borderBottomStyle:"solid",borderBottomColor:a?C.accentLight:"transparent",letterSpacing:.5,display:"flex",alignItems:"center",gap:5});
+  const tTab =a=>({padding:"8px 14px",cursor:"pointer",fontWeight:a?500:400,fontSize:11,color:a?C.accentLight:C.textMuted,borderBottom:a?`2px solid ${C.accentLight}`:"2px solid transparent",background:"none",border:"none",borderBottomWidth:2,borderBottomStyle:"solid",borderBottomColor:a?C.accentLight:"transparent",letterSpacing:.5});
+
+  const StatusBadge=({status,pid,tid,inline})=>{
+    const sc=C.statusC[status]||C.statusC["A fazer"];
+    if(!inline) return <span style={{display:"inline-flex",alignItems:"center",gap:5,padding:"3px 8px",borderRadius:2,fontSize:10,fontWeight:500,letterSpacing:1,background:sc.bg,color:sc.text,whiteSpace:"nowrap"}}><span style={{width:5,height:5,borderRadius:"50%",background:sc.dot}}/>{status.toUpperCase()}</span>;
+    return <InlineSelect value={status} options={STATUSES} onChange={v=>updInline(pid,tid,"status",v)} C={C} renderOption={s=>{ const c2=C.statusC[s]||C.statusC["A fazer"]; return <span style={{display:"inline-flex",alignItems:"center",gap:5,padding:"2px 7px",borderRadius:2,fontSize:10,fontWeight:500,background:c2.bg,color:c2.text,whiteSpace:"nowrap"}}><span style={{width:5,height:5,borderRadius:"50%",background:c2.dot}}/>{s}</span>; }}/>;
+  };
+  const PriorityDot=({priority,pid,tid,inline})=>{
+    const cl=C.priority[priority]||C.priority["Média"];
+    if(!inline) return <span style={{display:"inline-flex",alignItems:"center",gap:5}}><span style={{width:7,height:7,borderRadius:"50%",background:cl,display:"inline-block"}}/><span style={{fontSize:11,color:C.textMuted}}>{priority}</span></span>;
+    return <InlineSelect value={priority} options={PRIORITIES} onChange={v=>updInline(pid,tid,"priority",v)} C={C} renderOption={p=>{ const c2=C.priority[p]; return <span style={{display:"inline-flex",alignItems:"center",gap:6}}><span style={{width:7,height:7,borderRadius:"50%",background:c2,display:"inline-block"}}/><span style={{fontSize:11,color:C.textMuted}}>{p}</span></span>; }}/>;
+  };
+  const statCard=(n,l,icon)=>(
+    <div style={{background:C.card2,borderRadius:4,padding:"12px 14px",flex:1,border:`0.5px solid ${C.border}`}}>
+      <div style={{display:"flex",alignItems:"center",gap:5,marginBottom:4}}>{icon}<span style={{fontSize:9,color:C.textMuted,letterSpacing:2}}>{l}</span></div>
+      <div style={{fontSize:20,fontWeight:500,color:C.accentLight}}>{n}</div>
+    </div>
+  );
+  const BarChart=({data,color})=>{ const max=Math.max(...data.map(d=>d.value),1); return <div style={{display:"flex",alignItems:"flex-end",gap:5,height:68,marginTop:8}}>{data.map((d,i)=><div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2}}><span style={{fontSize:9,color:C.textMuted}}>{d.value||""}</span><div style={{width:"100%",background:color,borderRadius:"2px 2px 0 0",height:`${(d.value/max)*50}px`,minHeight:d.value?2:0}}/><span style={{fontSize:8,color:C.textLight}}>{d.label}</span></div>)}</div>; };
+
+  if(!loaded) return <div style={{background:C.bg,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:C.textMuted,fontSize:11,letterSpacing:3}}>CARREGANDO...</div>;
+
+  return (
+    <div style={{background:C.bg,minHeight:"100vh",color:C.textPrimary,fontFamily:"system-ui,sans-serif",paddingBottom:48}}>
+
+      {/* HEADER */}
+      <div style={{background:C.headerBg,borderBottom:"0.5px solid #2A1A08",padding:"0 24px",display:"flex",alignItems:"stretch",justifyContent:"space-between",position:"sticky",top:0,zIndex:40}}>
+        <div style={{display:"flex",alignItems:"center",gap:10,padding:"11px 0"}}>
+          <div style={{width:3,height:24,background:C.accent,borderRadius:2}}/>
+          <div>
+            <div style={{display:"flex",alignItems:"baseline",gap:4}}>
+              <span style={{color:"#F0DEC0",fontWeight:500,fontSize:15,letterSpacing:1}}>MKT_Joe</span>
+              <span style={{color:C.accent,fontWeight:400,fontSize:15}}> Gestão</span>
+            </div>
+            <div style={{fontSize:7,color:"#3A2A18",letterSpacing:3}}>WORKSPACE</div>
+          </div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          {saving&&<span style={{fontSize:9,color:C.textLight,letterSpacing:1}}>SALVANDO…</span>}
+          {stats.overdue>0&&<div style={{display:"flex",alignItems:"center",gap:4,padding:"3px 9px",borderRadius:3,background:C.overdueB,border:`0.5px solid ${C.overdue}`,fontSize:9,color:C.overdue,letterSpacing:1}}><Ic.Alert c={C.overdue} s={10}/>{stats.overdue} VENCIDA{stats.overdue>1?"S":""}</div>}
+          <button onClick={()=>setDark(d=>!d)} style={hBtn}><Ic.Theme c={C.accentLight} s={11}/>{dark?"CLARO":"ESCURO"}</button>
+          <button onClick={()=>setAddingProj(true)} style={hBtn}><Ic.Plus c={C.accentLight} s={11}/>PROJETO</button>
+        </div>
+      </div>
+
+      {/* MAIN TABS */}
+      <div style={{borderBottom:`0.5px solid ${C.border}`,display:"flex",paddingLeft:24,background:C.card,position:"sticky",top:50,zIndex:39,overflowX:"auto"}}>
+        {[["tarefas","Tarefas",<Ic.Project c={mainTab==="tarefas"?C.accentLight:C.textMuted}/>],
+          ["dashboard","Dashboard",<Ic.Dash c={mainTab==="dashboard"?C.accentLight:C.textMuted}/>],
+          ["membros","Membros",<Ic.Members c={mainTab==="membros"?C.accentLight:C.textMuted}/>],
+          ["etiquetas","Etiquetas",<Ic.Tag c={mainTab==="etiquetas"?C.accentLight:C.textMuted}/>],
+        ].map(([t,l,icon])=><button key={t} style={mTab(mainTab===t)} onClick={()=>setMainTab(t)}>{icon}{l}</button>)}
+      </div>
+
+      {/* ══ TAREFAS ══ */}
+      {mainTab==="tarefas"&&(<>
+        <div style={{display:"flex",gap:8,padding:"12px 24px 8px"}}>
+          {statCard(stats.total,"TOTAL",<Ic.Task c={C.textMuted} s={11}/>)}
+          {statCard(stats.prog,"ANDAMENTO",<Ic.Task c={C.textMuted} s={11}/>)}
+          {statCard(stats.done,"CONCLUÍDAS",<Ic.Task c={C.textMuted} s={11}/>)}
+          {statCard(stats.overdue,"VENCIDAS",<Ic.Alert c={stats.overdue>0?C.overdue:C.textMuted} s={11}/>)}
+        </div>
+        {/* Toolbar */}
+        <div style={{padding:"0 24px 10px",display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <div style={{position:"relative",flex:1,minWidth:140}}>
+            <div style={{position:"absolute",left:9,top:"50%",transform:"translateY(-50%)"}}><Ic.Search c={C.textMuted} s={13}/></div>
+            <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar tarefas..." style={{...inp,paddingLeft:30,fontSize:11}}/>
+          </div>
+          {[["fStatus",fStatus,setFStatus,["Todos",...STATUSES]],["fPriority",fPriority,setFPriority,["Todos",...PRIORITIES]],["fMember",fMember,setFMember,["Todos",...members]]].map(([k,v,s,opts])=>(
+            <select key={k} value={v} onChange={e=>s(e.target.value)} style={{...inp,width:"auto",fontSize:11,padding:"6px 8px",cursor:"pointer"}}>
+              {opts.map(o=><option key={o}>{o}</option>)}
+            </select>
+          ))}
+          {hasFilters&&<button onClick={()=>{setSearch("");setFStatus("Todos");setFPriority("Todos");setFMember("Todos");}} style={{...btn(false,true),color:C.overdue,borderColor:C.overdue,letterSpacing:1}}>LIMPAR</button>}
+          <div style={{display:"flex",gap:3,marginLeft:"auto"}}>
+            {[["list",<Ic.List c={view==="list"?C.accentLight:C.textMuted}/>],["kanban",<Ic.Kanban c={view==="kanban"?C.accentLight:C.textMuted}/>],["calendar",<Ic.Cal c={view==="calendar"?C.accentLight:C.textMuted}/>]].map(([v,icon])=>(
+              <button key={v} onClick={()=>setView(v)} style={{padding:5,borderRadius:3,border:`0.5px solid ${view===v?C.accentLight:C.border}`,background:view===v?C.accentDim:"transparent",cursor:"pointer",display:"flex",alignItems:"center"}}>{icon}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Calendar */}
+        {view==="calendar"&&<CalendarView allTasks={allTasks} C={C} onOpenTask={openPanel} projects={projects}/>}
+
+        {/* Kanban */}
+        {view==="kanban"&&(
+          <div style={{display:"flex",gap:10,padding:"0 24px 24px",overflowX:"auto"}}>
+            {STATUSES.map(status=>{
+              const sc=C.statusC[status];
+              const colTasks=filtered.flatMap(pr=>pr.tasks.filter(t=>t.status===status).map(t=>({...t,pid:pr.id})));
+              return (
+                <div key={status}
+                  onDragOver={e=>{ e.preventDefault(); }}
+                  onDrop={e=>dnd.onDropCol(e,status)}
+                  style={{minWidth:240,flex:1,transition:"background .15s",background:dnd.over?.status===status?C.accentDim:"transparent",borderRadius:4,padding:"0 0 8px"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:8,padding:"6px 0"}}>
+                    <span style={{width:7,height:7,borderRadius:"50%",background:sc.dot,display:"inline-block"}}/>
+                    <span style={{fontSize:10,fontWeight:500,color:sc.text,letterSpacing:2}}>{status.toUpperCase()}</span>
+                    <span style={{fontSize:9,color:C.textLight,marginLeft:"auto"}}>{colTasks.length}</span>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                    {colTasks.map(task=>{ const od=isOD(task.due)&&task.status!=="Concluído"; const isOver=dnd.over?.tid===task.id; return (
+                      <div key={task.id}
+                        draggable
+                        onDragStart={e=>dnd.onDragStart(e,task.pid,task.id)}
+                        onDragEnd={dnd.onDragEnd}
+                        onDragOver={e=>{ e.stopPropagation(); dnd.onDragOver(e,task.pid,task.id); }}
+                        onDragLeave={dnd.onDragLeave}
+                        onDrop={e=>{ e.stopPropagation(); dnd.onDropEl(e,task.pid,task.id); }}
+                        onClick={()=>openPanel(task,task.pid)}
+                        style={{background:C.card,border:`0.5px solid ${isOver?C.accentLight:od?C.overdue:C.border}`,borderRadius:4,padding:10,cursor:"grab",outline:isOver?`2px solid ${C.accentLight}`:"none",transition:"outline .1s,border-color .1s"}}>
+                        <div style={{fontWeight:500,fontSize:12,color:C.textPrimary,marginBottom:5,lineHeight:1.4}}>{task.title}</div>
+                        <div style={{fontSize:9,color:C.textMuted,letterSpacing:1,marginBottom:7}}>{task.pname?.toUpperCase()}</div>
+                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                          <PriorityDot priority={task.priority}/>
+                          <span style={{fontSize:9,color:od?C.overdue:C.textLight,display:"flex",alignItems:"center",gap:3}}>{od&&<Ic.Alert c={C.overdue} s={10}/>}{fmtDate(task.due)}</span>
+                        </div>
+                        {task.owner&&<div style={{display:"flex",alignItems:"center",gap:5,marginTop:7,paddingTop:7,borderTop:`0.5px solid ${C.border}`}}><Avatar name={task.owner} idx={ownerIdx(task.owner)} size={18}/><span style={{fontSize:10,color:C.textMuted}}>{task.owner}</span></div>}
+                        {task.comments?.length>0&&<div style={{display:"flex",alignItems:"center",gap:4,marginTop:5,fontSize:9,color:C.textLight}}><Ic.Chat c={C.textLight} s={10}/>{task.comments.length}</div>}
+                        {task.subtasks?.length>0&&(()=>{ const dn=task.subtasks.filter(s=>s.done).length,tot=task.subtasks.length,pct=Math.round(dn/tot*100); return (
+                          <div style={{marginTop:7}}>
+                            <div style={{fontSize:9,color:dn===tot?C.statusC["Concluído"].dot:C.textLight,marginBottom:3}}>{dn}/{tot} subtarefas</div>
+                            <div style={{height:3,background:C.surface,borderRadius:2}}><div style={{height:3,borderRadius:2,background:dn===tot?C.statusC["Concluído"].dot:C.accent,width:`${pct}%`,transition:"width .3s"}}/></div>
+                          </div>
+                        ); })()}
+                      </div>
+                    );})}
+                    <button onClick={()=>{ const pr=projects[0]; if(pr) openNewPanel(pr.id); }} style={{background:"none",border:`0.5px dashed ${C.border}`,borderRadius:4,padding:8,cursor:"pointer",color:C.textLight,fontSize:10,letterSpacing:1,display:"flex",alignItems:"center",justifyContent:"center",gap:4}}><Ic.Plus c={C.textLight} s={10}/>TAREFA</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* List */}
+        {view==="list"&&filtered.map(pr=>(
+          <div key={pr.id} style={{margin:"0 24px 10px",background:C.card,borderRadius:4,border:`0.5px solid ${C.border}`,overflow:"hidden"}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 14px",borderBottom:pr.collapsed?"none":`0.5px solid ${C.border}`,cursor:"pointer",background:C.card2}} onClick={()=>toggleC(pr.id)}>
+              <div style={{display:"flex",alignItems:"center",gap:8}}>
+                <Ic.Chevron c={C.textMuted} up={!pr.collapsed}/>
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:7}}>
+                    <span style={{fontWeight:500,fontSize:13,color:C.accentLight}}>{pr.name}</span>
+                    <span style={{fontSize:9,color:C.textLight,letterSpacing:1}}>{pr.tasks.length} TAREFAS</span>
+                  </div>
+                  {pr.desc&&<div style={{fontSize:11,color:C.textMuted,marginTop:1}}>{pr.desc}</div>}
+                </div>
+              </div>
+              <div style={{display:"flex",gap:4}} onClick={e=>e.stopPropagation()}>
+                <button onClick={e=>openEditP(pr,e)} style={{background:"none",border:"none",cursor:"pointer",padding:3}}><Ic.Edit c={C.textMuted}/></button>
+                <button onClick={e=>{e.stopPropagation();delProj(pr.id);}} style={{background:"none",border:"none",cursor:"pointer",padding:3}}><Ic.X c={C.textLight}/></button>
+              </div>
+            </div>
+            {!pr.collapsed&&(<>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,tableLayout:"fixed"}}>
+                <colgroup><col style={{width:"28%"}}/><col style={{width:"14%"}}/><col style={{width:"10%"}}/><col style={{width:"10%"}}/><col style={{width:"13%"}}/><col style={{width:"16%"}}/><col style={{width:"9%"}}/></colgroup>
+                <thead><tr style={{background:C.bg}}>{["TAREFA","STATUS","PRIOR.","PRAZO","RESPONSÁVEL","ETIQUETAS",""].map(h=><th key={h} style={{padding:"6px 10px",textAlign:"left",color:C.textMuted,fontWeight:400,borderBottom:`0.5px solid ${C.border}`,fontSize:9,letterSpacing:1}}>{h}</th>)}</tr></thead>
+                <tbody>{pr.tasks.map((task,ti)=>{ const od=isOD(task.due)&&task.status!=="Concluído"; const isOver=dnd.over?.tid===task.id; return (
+                  <tr key={task.id}
+                    draggable
+                    onDragStart={e=>dnd.onDragStart(e,pr.id,task.id)}
+                    onDragEnd={dnd.onDragEnd}
+                    onDragOver={e=>dnd.onDragOver(e,pr.id,task.id)}
+                    onDragLeave={dnd.onDragLeave}
+                    onDrop={e=>dnd.onDropEl(e,pr.id,task.id)}
+                    style={{background:od?(dark?"#1E0A0A":"#FFF5F5"):ti%2===0?C.card:C.card2,cursor:"grab",outline:isOver?`2px solid ${C.accentLight}`:"none",transition:"outline .1s"}}
+                    onClick={()=>openPanel(task,pr.id)}>
+                    <td style={{padding:"9px 10px",borderBottom:`0.5px solid ${C.border}`}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6}}>
+                        <div style={{width:3,height:22,borderRadius:2,background:C.statusC[task.status]?.dot||C.border,flexShrink:0}}/>
+                        <div style={{overflow:"hidden"}}>
+                          <div style={{fontWeight:500,color:C.textPrimary,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{task.title}</div>
+                          <div style={{display:"flex",gap:5,marginTop:2}}>
+                            {task.script?.length>0&&<span style={{fontSize:9,color:C.textLight,display:"flex",alignItems:"center",gap:2}}><Ic.Script c={C.textLight} s={9}/>{task.script.length}</span>}
+                            {task.links?.length>0&&<span style={{fontSize:9,color:C.textLight,display:"flex",alignItems:"center",gap:2}}><Ic.Link c={C.textLight} ca={C.textLight} s={9}/>{task.links.length}</span>}
+                            {task.comments?.length>0&&<span style={{fontSize:9,color:C.textLight,display:"flex",alignItems:"center",gap:2}}><Ic.Chat c={C.textLight} s={9}/>{task.comments.length}</span>}
+                            {task.subtasks?.length>0&&(()=>{ const dn=task.subtasks.filter(s=>s.done).length,tot=task.subtasks.length; return <span style={{fontSize:9,color:dn===tot?C.statusC["Concluído"].dot:C.textLight,display:"flex",alignItems:"center",gap:2}}><Ic.Task c={dn===tot?C.statusC["Concluído"].dot:C.textLight} s={9}/>{dn}/{tot}</span>; })()}
+                          </div>
+                        </div>
+                      </div>
+                    </td>
+                    <td style={{padding:"9px 10px",borderBottom:`0.5px solid ${C.border}`}} onClick={e=>e.stopPropagation()}><StatusBadge status={task.status} pid={pr.id} tid={task.id} inline/></td>
+                    <td style={{padding:"9px 10px",borderBottom:`0.5px solid ${C.border}`}} onClick={e=>e.stopPropagation()}><PriorityDot priority={task.priority} pid={pr.id} tid={task.id} inline/></td>
+                    <td style={{padding:"9px 10px",borderBottom:`0.5px solid ${C.border}`}} onClick={e=>e.stopPropagation()}>
+                      <span style={{fontSize:11,color:od?C.overdue:C.textMuted,display:"flex",alignItems:"center",gap:4,whiteSpace:"nowrap"}}>{od&&<Ic.Alert c={C.overdue} s={10}/>}{fmtDate(task.due)}</span>
+                    </td>
+                    <td style={{padding:"9px 10px",borderBottom:`0.5px solid ${C.border}`}}>
+                      {task.owner?<div style={{display:"flex",alignItems:"center",gap:5}}><Avatar name={task.owner} idx={ownerIdx(task.owner)} size={20}/><span style={{fontSize:11,color:C.textMuted,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{task.owner}</span></div>:<span style={{color:C.textLight,fontSize:11}}>—</span>}
+                    </td>
+                    <td style={{padding:"9px 10px",borderBottom:`0.5px solid ${C.border}`}}>
+                      <div style={{display:"flex",gap:3,flexWrap:"wrap"}}>
+                        {(task.tags||[]).slice(0,2).map((tg,i)=><span key={tg} style={{padding:"1px 5px",borderRadius:2,fontSize:9,letterSpacing:.5,background:C.tagBg[i%C.tagBg.length],color:C.tagText[i%C.tagText.length],whiteSpace:"nowrap"}}>{tg.toUpperCase()}</span>)}
+                        {(task.tags||[]).length>2&&<span style={{fontSize:9,color:C.textLight}}>+{task.tags.length-2}</span>}
+                      </div>
+                    </td>
+                    <td style={{padding:"9px 10px",borderBottom:`0.5px solid ${C.border}`}}>
+                      <button onClick={e=>{e.stopPropagation();delTask(pr.id,task.id);}} style={{background:"none",border:"none",cursor:"pointer",padding:2}}><Ic.X c={C.textLight} s={10}/></button>
+                    </td>
+                  </tr>
+                );})}
+                </tbody>
+              </table>
+              <button style={{background:"none",border:"none",color:C.accentLight,cursor:"pointer",fontSize:10,padding:"8px 14px",display:"flex",alignItems:"center",gap:5,letterSpacing:1}} onClick={()=>openNewPanel(pr.id)}><Ic.Plus c={C.accentLight} s={10}/>ADICIONAR TAREFA</button>
+            </>)}
+          </div>
+        ))}
+        {addingProj&&(
+          <div style={{margin:"0 24px 10px",background:C.card,borderRadius:4,border:`0.5px solid ${C.border}`,padding:14}}>
+            <div style={{fontSize:9,fontWeight:500,color:C.accentLight,marginBottom:10,letterSpacing:2}}>NOVO PROJETO</div>
+            <input value={newProj.name} onChange={e=>setNewProj(f=>({...f,name:e.target.value}))} placeholder="Nome do projeto..." style={{...inp,marginBottom:7}}/>
+            <input value={newProj.desc} onChange={e=>setNewProj(f=>({...f,desc:e.target.value}))} placeholder="Descrição..." style={{...inp,marginBottom:10}}/>
+            <div style={{display:"flex",gap:8}}><button style={btn(true)} onClick={addProj}>Criar</button><button style={btn(false)} onClick={()=>setAddingProj(false)}>Cancelar</button></div>
+          </div>
+        )}
+      </>)}
+
+      {/* ══ DASHBOARD ══ */}
+      {mainTab==="dashboard"&&(
+        <div style={{padding:"12px 24px"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+            <span style={{fontSize:10,fontWeight:500,color:C.accentLight,letterSpacing:3}}>RELATÓRIO DE TAREFAS</span>
+            <div style={{display:"flex",gap:6}}>{["semanal","mensal"].map(r=><button key={r} onClick={()=>setDashRange(r)} style={{...btn(dashRange===r,true),letterSpacing:1,fontSize:9}}>{r.toUpperCase()}</button>)}</div>
+          </div>
+          <div style={{display:"flex",gap:8,marginBottom:10}}>
+            {statCard(dashTasks.length,"PERÍODO",<Ic.Dash c={C.textMuted} s={11}/>)}
+            {statCard(dashTasks.filter(t=>t.status==="Concluído").length,"CONCLUÍDAS",<Ic.Task c={C.textMuted} s={11}/>)}
+            {statCard(dashTasks.filter(t=>t.status==="Em andamento").length,"ANDAMENTO",<Ic.Task c={C.textMuted} s={11}/>)}
+            {statCard(stats.overdue,"VENCIDAS",<Ic.Alert c={stats.overdue>0?C.overdue:C.textMuted} s={11}/>)}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:8}}>
+            <div style={{background:C.card,borderRadius:4,border:`0.5px solid ${C.border}`,padding:12}}>
+              <div style={{fontSize:9,color:C.accentLight,letterSpacing:2,marginBottom:4}}>CRIADAS — {dashRange==="semanal"?"7 DIAS":"4 SEMANAS"}</div>
+              <BarChart data={dashRange==="semanal"?weekBar:monthBar} color={C.accent}/>
+            </div>
+            <div style={{background:C.card,borderRadius:4,border:`0.5px solid ${C.border}`,padding:12}}>
+              <div style={{fontSize:9,color:C.accentLight,letterSpacing:2,marginBottom:10}}>STATUS GERAL</div>
+              {STATUSES.map(s=>{ const cnt=allTasks.filter(t=>t.status===s).length; const pct=allTasks.length?Math.round(cnt/allTasks.length*100):0; const sc=C.statusC[s]; return (
+                <div key={s} style={{marginBottom:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:C.textMuted,marginBottom:3}}><span style={{display:"flex",alignItems:"center",gap:5}}><span style={{width:5,height:5,borderRadius:"50%",background:sc.dot}}/>{s}</span><span>{cnt}</span></div>
+                  <div style={{height:3,background:C.surface,borderRadius:2}}><div style={{height:3,background:sc.dot,borderRadius:2,width:`${pct}%`,transition:"width .4s"}}/></div>
+                </div>
+              );})}
+            </div>
+          </div>
+          <div style={{background:C.card,borderRadius:4,border:`0.5px solid ${C.border}`,padding:12}}>
+            <div style={{fontSize:9,color:C.accentLight,letterSpacing:2,marginBottom:10}}>DESEMPENHO POR RESPONSÁVEL</div>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+              <thead><tr>{["RESPONSÁVEL","TOTAL","CONCLUÍDAS","ANDAMENTO","A FAZER"].map(h=><th key={h} style={{padding:"5px 8px",textAlign:"left",color:C.textMuted,fontWeight:400,borderBottom:`0.5px solid ${C.border}`,fontSize:9,letterSpacing:1}}>{h}</th>)}</tr></thead>
+              <tbody>{members.map((m,mi)=>{ const mt=allTasks.filter(t=>t.owner===m); if(!mt.length) return null; return (
+                <tr key={m}>
+                  <td style={{padding:"7px 8px",borderBottom:`0.5px solid ${C.border}`}}><div style={{display:"flex",alignItems:"center",gap:7}}><Avatar name={m} idx={mi} size={22}/><span style={{fontWeight:500,color:C.textPrimary,fontSize:12}}>{m}</span></div></td>
+                  <td style={{padding:"7px 8px",borderBottom:`0.5px solid ${C.border}`,color:C.textMuted}}>{mt.length}</td>
+                  {STATUSES.map(s=><td key={s} style={{padding:"7px 8px",borderBottom:`0.5px solid ${C.border}`}}><span style={{padding:"2px 7px",borderRadius:2,fontSize:9,background:C.statusC[s].bg,color:C.statusC[s].text}}>{mt.filter(t=>t.status===s).length}</span></td>)}
+                </tr>
+              );})}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ══ MEMBROS ══ */}
+      {mainTab==="membros"&&(
+        <div style={{padding:"12px 24px"}}>
+          <div style={{fontSize:9,color:C.accentLight,letterSpacing:3,marginBottom:10}}>GERENCIAR MEMBROS</div>
+          <div style={{background:C.card,borderRadius:4,border:`0.5px solid ${C.border}`,overflow:"hidden",marginBottom:10}}>
+            {members.map((m,i)=>(
+              <div key={m} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"11px 14px",borderBottom:`0.5px solid ${C.border}`,background:i%2===0?C.card:C.card2}}>
+                {editingMember===i?(
+                  <div style={{display:"flex",gap:8,flex:1,alignItems:"center"}}><Avatar name={m} idx={i} size={28}/><input autoFocus value={newMemberName} onChange={e=>setNewMemberName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveMemberEdit()} style={{...inp,flex:1,padding:"5px 8px"}}/><button style={btn(true,true)} onClick={saveMemberEdit}>Salvar</button><button style={btn(false,true)} onClick={()=>setEditingMember(null)}>Cancelar</button></div>
+                ):(
+                  <>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <Avatar name={m} idx={i} size={34}/>
+                      <div><div style={{fontWeight:500,color:C.textPrimary,fontSize:13}}>{m}</div><div style={{fontSize:9,color:C.textMuted,marginTop:1,letterSpacing:1}}>{allTasks.filter(t=>t.owner===m).length} TAREFAS · {allTasks.filter(t=>t.owner===m&&t.status==="Concluído").length} CONCLUÍDAS</div></div>
+                    </div>
+                    <div style={{display:"flex",gap:4}}><button onClick={()=>{setEditingMember(i);setNewMemberName(m);}} style={{background:"none",border:"none",cursor:"pointer",padding:3}}><Ic.Edit c={C.textMuted}/></button><button onClick={()=>deleteMember(i)} style={{background:"none",border:"none",cursor:"pointer",padding:3}}><Ic.X c={C.textLight}/></button></div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:8}}><input value={editingMember===null?newMemberName:""} onChange={e=>setNewMemberName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addMember()} placeholder="Nome do novo membro..." style={{...inp,flex:1}} onFocus={()=>setEditingMember(null)}/><button style={btn(true)} onClick={addMember}><Ic.Plus c="#F0DEC0" s={12}/>Adicionar</button></div>
+        </div>
+      )}
+
+      {/* ══ ETIQUETAS ══ */}
+      {mainTab==="etiquetas"&&(
+        <div style={{padding:"12px 24px"}}>
+          <div style={{fontSize:9,color:C.accentLight,letterSpacing:3,marginBottom:10}}>GERENCIAR ETIQUETAS</div>
+          <div style={{background:C.card,borderRadius:4,border:`0.5px solid ${C.border}`,overflow:"hidden",marginBottom:10}}>
+            {tags.map((tg,i)=>(
+              <div key={tg} style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 14px",borderBottom:`0.5px solid ${C.border}`,background:i%2===0?C.card:C.card2}}>
+                {editingTag===i?(
+                  <div style={{display:"flex",gap:8,flex:1,alignItems:"center"}}><input autoFocus value={newTagName} onChange={e=>setNewTagName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&saveTagEdit()} style={{...inp,flex:1,padding:"5px 8px"}}/><button style={btn(true,true)} onClick={saveTagEdit}>Salvar</button><button style={btn(false,true)} onClick={()=>setEditingTag(null)}>Cancelar</button></div>
+                ):(
+                  <>
+                    <div style={{display:"flex",alignItems:"center",gap:9}}><span style={{padding:"3px 9px",borderRadius:2,fontSize:9,letterSpacing:1,fontWeight:500,background:C.tagBg[i%C.tagBg.length],color:C.tagText[i%C.tagText.length]}}>{tg.toUpperCase()}</span><span style={{fontSize:11,color:C.textMuted}}>{allTasks.filter(t=>(t.tags||[]).includes(tg)).length} tarefas</span></div>
+                    <div style={{display:"flex",gap:4}}><button onClick={()=>{setEditingTag(i);setNewTagName(tg);}} style={{background:"none",border:"none",cursor:"pointer",padding:3}}><Ic.Edit c={C.textMuted}/></button><button onClick={()=>deleteTag(i)} style={{background:"none",border:"none",cursor:"pointer",padding:3}}><Ic.X c={C.textLight}/></button></div>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={{display:"flex",gap:8}}><input value={editingTag===null?newTagName:""} onChange={e=>setNewTagName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addTag()} placeholder="Nova etiqueta..." style={{...inp,flex:1}} onFocus={()=>setEditingTag(null)}/><button style={btn(true)} onClick={addTag}><Ic.Plus c="#F0DEC0" s={12}/>Adicionar</button></div>
+        </div>
+      )}
+
+      {/* ══ PAINEL LATERAL ══ */}
+      {panel==="task"&&panelTask&&(
+        <>
+          <div onClick={()=>setPanel(null)} style={{position:"fixed",inset:0,background:"rgba(8,4,0,.4)",zIndex:60}}/>
+          <div style={{position:"fixed",top:0,right:0,width:440,maxWidth:"96vw",height:"100vh",background:C.card,borderLeft:`0.5px solid ${C.border}`,zIndex:61,display:"flex",flexDirection:"column",boxShadow:`-8px 0 32px ${C.shadow}`}}>
+            <div style={{padding:"14px 18px",borderBottom:`0.5px solid ${C.border}`,display:"flex",alignItems:"center",justifyContent:"space-between",background:C.card2,flexShrink:0}}>
+              <span style={{fontSize:9,color:C.textMuted,letterSpacing:2}}>{panelTask.id?"EDITAR TAREFA":"NOVA TAREFA"}</span>
+              <button onClick={()=>setPanel(null)} style={{background:"none",border:"none",cursor:"pointer",padding:3}}><Ic.X c={C.textMuted}/></button>
+            </div>
+            <div style={{padding:"12px 18px 0",flexShrink:0}}>
+              <input value={panelTask.title||""} onChange={e=>setPanelTask(f=>({...f,title:e.target.value}))} placeholder="Nome da tarefa..." style={{width:"100%",padding:"0 0 10px",fontSize:15,fontWeight:500,background:"transparent",border:"none",outline:"none",color:C.textPrimary,boxSizing:"border-box",borderBottom:`0.5px solid ${C.border}`}}/>
+            </div>
+            <div style={{display:"flex",borderBottom:`0.5px solid ${C.border}`,paddingLeft:18,flexShrink:0,overflowX:"auto"}}>
+              {[["details","Detalhes",null],["subtasks","Subtarefas",<Ic.Task c={taskTab==="subtasks"?C.accentLight:C.textMuted} s={11}/>],["script","Roteiro",<Ic.Script c={taskTab==="script"?C.accentLight:C.textMuted} s={11}/>],["links","Links",<Ic.Link c={taskTab==="links"?C.accentLight:C.textMuted} ca={taskTab==="links"?C.accentGold:C.textMuted} s={11}/>],["comments","Comentários",<Ic.Chat c={taskTab==="comments"?C.accentLight:C.textMuted} s={11}/>],["history","Histórico",<Ic.List c={taskTab==="history"?C.accentLight:C.textMuted} s={11}/>]].map(([t,l,icon])=>(
+                <button key={t} style={tTab(taskTab===t)} onClick={()=>setTaskTab(t)}>
+                  <span style={{display:"flex",alignItems:"center",gap:4}}>
+                    {icon}{l}
+                    {t==="comments"&&panelTask.comments?.length>0&&<span style={{background:C.accentDim,color:C.accentLight,fontSize:8,padding:"1px 5px",borderRadius:8,fontWeight:500}}>{panelTask.comments.length}</span>}
+                    {t==="subtasks"&&panelTask.subtasks?.length>0&&<span style={{background:C.accentDim,color:C.accentLight,fontSize:8,padding:"1px 5px",borderRadius:8,fontWeight:500}}>{panelTask.subtasks.filter(s=>s.done).length}/{panelTask.subtasks.length}</span>}
+                  </span>
+                </button>
+              ))}
+                <button key={t} style={tTab(taskTab===t)} onClick={()=>setTaskTab(t)}><span style={{display:"flex",alignItems:"center",gap:4}}>{icon}{l}{t==="comments"&&panelTask.comments?.length>0&&<span style={{background:C.accentDim,color:C.accentLight,fontSize:8,padding:"1px 5px",borderRadius:8,fontWeight:500}}>{panelTask.comments.length}</span>}</span></button>
+              ))}
+            </div>
+            <div style={{flex:1,overflowY:"auto",padding:"14px 18px"}}>
+              {taskTab==="details"&&(
+                <>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+                    {[["STATUS","status",STATUSES],["PRIORIDADE","priority",PRIORITIES]].map(([lbl,key,opts])=>(
+                      <div key={key}><label style={{display:"block",fontSize:9,color:C.textMuted,marginBottom:4,letterSpacing:1}}>{lbl}</label><select style={inp} value={panelTask[key]||opts[0]} onChange={e=>setPanelTask(f=>({...f,[key]:e.target.value}))}>{opts.map(o=><option key={o}>{o}</option>)}</select></div>
+                    ))}
+                    <div><label style={{display:"block",fontSize:9,color:C.textMuted,marginBottom:4,letterSpacing:1}}>PRAZO</label><input type="date" style={inp} value={panelTask.due||""} onChange={e=>setPanelTask(f=>({...f,due:e.target.value}))}/></div>
+                    <div>
+                      <label style={{display:"block",fontSize:9,color:C.textMuted,marginBottom:4,letterSpacing:1}}>RESPONSÁVEL</label>
+                      <select style={inp} value={panelTask.owner||""} onChange={e=>setPanelTask(f=>({...f,owner:e.target.value}))}><option value="">—</option>{members.map(m=><option key={m}>{m}</option>)}</select>
+                      {panelTask.owner&&<div style={{display:"flex",alignItems:"center",gap:7,marginTop:7}}><Avatar name={panelTask.owner} idx={ownerIdx(panelTask.owner)} size={24}/><span style={{fontSize:12,color:C.textMuted}}>{panelTask.owner}</span></div>}
+                    </div>
+                  </div>
+                  <label style={{display:"block",fontSize:9,color:C.textMuted,marginBottom:7,letterSpacing:1}}>ETIQUETAS</label>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:5}}>
+                    {tags.map((tg,i)=>{ const a=(panelTask.tags||[]).includes(tg); return <span key={tg} onClick={()=>togTag(tg)} style={{padding:"3px 9px",borderRadius:2,fontSize:9,letterSpacing:1,fontWeight:500,cursor:"pointer",background:a?C.tagBg[i%C.tagBg.length]:C.surface,color:a?C.tagText[i%C.tagText.length]:C.textMuted,border:`0.5px solid ${a?C.tagBg[i%C.tagBg.length]:C.border}`}}>{tg.toUpperCase()}</span>; })}
+                  </div>
+                </>
+              )}
+              {taskTab==="script"&&(
+                <>
+                  {!(panelTask.script?.length)&&<div style={{textAlign:"center",color:C.textLight,fontSize:11,padding:"28px 0",letterSpacing:1}}>NENHUM BLOCO. ADICIONE ABAIXO.</div>}
+                  {(panelTask.script||[]).map((block,idx)=>(
+                    <div key={block.id} style={{background:C.surface,borderRadius:3,padding:10,marginBottom:7,border:`0.5px solid ${C.border}`}}>
+                      <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:7}}>
+                        <span style={{width:6,height:6,borderRadius:1,background:{Ato:"#B87040",Cena:"#D4904A",Diálogo:"#70A870",Narração:"#7080A0"}[block.type],display:"inline-block"}}/>
+                        <select value={block.type} onChange={e=>updBlock(block.id,"type",e.target.value)} style={{...inp,width:"auto",padding:"2px 6px",fontSize:10,letterSpacing:1}}>{BTYPES.map(t=><option key={t}>{t}</option>)}</select>
+                        <div style={{display:"flex",gap:3,marginLeft:"auto"}}>
+                          {[["N","bold"],["I","italic"],["U","underline"]].map(([l,f])=><button key={f} onClick={()=>updBlock(block.id,f,!block[f])} style={{width:19,height:19,borderRadius:2,border:`0.5px solid ${C.border}`,cursor:"pointer",background:block[f]?C.accent:C.card,color:block[f]?"#F0DEC0":C.textMuted,fontSize:9,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center",fontStyle:f==="italic"?"italic":"normal",textDecoration:f==="underline"?"underline":"none"}}>{l}</button>)}
+                          <button onClick={()=>moveBlock(block.id,-1)} disabled={idx===0} style={{width:19,height:19,borderRadius:2,border:`0.5px solid ${C.border}`,cursor:"pointer",background:C.card,color:C.textMuted,fontSize:9,display:"flex",alignItems:"center",justifyContent:"center"}}>↑</button>
+                          <button onClick={()=>moveBlock(block.id,1)} disabled={idx===(panelTask.script.length-1)} style={{width:19,height:19,borderRadius:2,border:`0.5px solid ${C.border}`,cursor:"pointer",background:C.card,color:C.textMuted,fontSize:9,display:"flex",alignItems:"center",justifyContent:"center"}}>↓</button>
+                          <button onClick={()=>delBlock(block.id)} style={{width:19,height:19,borderRadius:2,border:`0.5px solid ${C.border}`,cursor:"pointer",background:C.card,display:"flex",alignItems:"center",justifyContent:"center"}}><Ic.X c={C.textLight} s={9}/></button>
+                        </div>
+                      </div>
+                      <textarea value={block.content} onChange={e=>updBlock(block.id,"content",e.target.value)} placeholder={`${block.type}...`} rows={2} style={{...inp,resize:"vertical",fontStyle:block.italic?"italic":"normal",fontWeight:block.bold?"500":"400",textDecoration:block.underline?"underline":"none",lineHeight:1.6,fontSize:12}}/>
+                    </div>
+                  ))}
+                  <button onClick={addBlock} style={{...btn(false),width:"100%",marginTop:4,borderStyle:"dashed",justifyContent:"center",letterSpacing:1,fontSize:10}}><Ic.Plus c={C.textMuted} s={10}/>BLOCO</button>
+                </>
+              )}
+              {taskTab==="links"&&(
+                <>
+                  {!(panelTask.links?.length)&&<div style={{textAlign:"center",color:C.textLight,fontSize:11,padding:"28px 0",letterSpacing:1}}>NENHUM LINK. ADICIONE ABAIXO.</div>}
+                  {(panelTask.links||[]).map(link=>(
+                    <div key={link.id} style={{background:C.surface,borderRadius:3,padding:10,marginBottom:7,border:`0.5px solid ${C.border}`}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><span style={{display:"flex",alignItems:"center",gap:4,fontSize:9,color:C.accentLight,letterSpacing:2}}><Ic.Link c={C.accentLight} ca={C.accentGold} s={10}/>LINK</span><button onClick={()=>delLink(link.id)} style={{background:"none",border:"none",cursor:"pointer",padding:2}}><Ic.X c={C.textLight} s={10}/></button></div>
+                      <input value={link.url}   onChange={e=>updLink(link.id,"url",e.target.value)}   placeholder="https://..." style={{...inp,marginBottom:5,fontSize:12}}/>
+                      <input value={link.title} onChange={e=>updLink(link.id,"title",e.target.value)} placeholder="Título" style={{...inp,marginBottom:5,fontSize:12}}/>
+                      <input value={link.desc}  onChange={e=>updLink(link.id,"desc",e.target.value)}  placeholder="Descrição (opcional)" style={{...inp,fontSize:12}}/>
+                    </div>
+                  ))}
+                  <button onClick={addLink} style={{...btn(false),width:"100%",marginTop:4,borderStyle:"dashed",justifyContent:"center",letterSpacing:1,fontSize:10}}><Ic.Plus c={C.textMuted} s={10}/>LINK</button>
+                </>
+              )}
+              {taskTab==="subtasks"&&(
+                <div>
+                  {/* Progress bar */}
+                  {panelTask.subtasks?.length>0&&(()=>{
+                    const done=(panelTask.subtasks||[]).filter(s=>s.done).length;
+                    const total=panelTask.subtasks.length;
+                    const pct=Math.round(done/total*100);
+                    return (
+                      <div style={{marginBottom:16}}>
+                        <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:C.textMuted,marginBottom:5,letterSpacing:1}}>
+                          <span>{done} DE {total} CONCLUÍDAS</span>
+                          <span style={{color:pct===100?C.statusC["Concluído"].dot:C.accentLight,fontWeight:500}}>{pct}%</span>
+                        </div>
+                        <div style={{height:4,background:C.surface,borderRadius:2}}>
+                          <div style={{height:4,borderRadius:2,background:pct===100?C.statusC["Concluído"].dot:C.accent,width:`${pct}%`,transition:"width .3s"}}/>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Subtask list */}
+                  <div style={{display:"flex",flexDirection:"column",gap:4,marginBottom:12}}>
+                    {!(panelTask.subtasks?.length)&&<div style={{textAlign:"center",color:C.textLight,fontSize:11,padding:"20px 0",letterSpacing:1}}>NENHUMA SUBTAREFA. ADICIONE ABAIXO.</div>}
+                    {(panelTask.subtasks||[]).map((sub)=>(
+                      <div key={sub.id} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:3,background:sub.done?C.surface:C.card2,border:`0.5px solid ${C.border}`,transition:"background .15s"}}>
+                        <div style={{cursor:"pointer",flexShrink:0}} onClick={()=>toggleSub(sub.id)}>
+                          <Ic.Check2 c={C.textMuted} filled={sub.done} C={C} s={16}/>
+                        </div>
+                        {editingSub===sub.id ? (
+                          <input autoFocus value={editingSubText} onChange={e=>setEditingSubText(e.target.value)}
+                            onBlur={()=>{ renameSub(sub.id,editingSubText||sub.text); setEditingSub(null); }}
+                            onKeyDown={e=>{ if(e.key==="Enter"){ renameSub(sub.id,editingSubText||sub.text); setEditingSub(null); } if(e.key==="Escape") setEditingSub(null); }}
+                            style={{...inp,flex:1,padding:"2px 6px",fontSize:12,background:"transparent"}}/>
+                        ):(
+                          <span onDoubleClick={()=>{ setEditingSub(sub.id); setEditingSubText(sub.text); }}
+                            style={{flex:1,fontSize:12,color:sub.done?C.textMuted:C.textPrimary,textDecoration:sub.done?"line-through":"none",cursor:"text",lineHeight:1.4}}>{sub.text}</span>
+                        )}
+                        <button onClick={()=>delSub(sub.id)} style={{background:"none",border:"none",cursor:"pointer",padding:2,flexShrink:0,opacity:.5}}><Ic.X c={C.textLight} s={10}/></button>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Add subtask */}
+                  <div style={{display:"flex",gap:6}}>
+                    <input
+                      value={newSubText}
+                      onChange={e=>setNewSubText(e.target.value)}
+                      onKeyDown={e=>e.key==="Enter"&&addSub()}
+                      placeholder="Nova subtarefa... (Enter para adicionar)"
+                      style={{...inp,flex:1,fontSize:12}}
+                    />
+                    <button style={btn(true,true)} onClick={addSub}><Ic.Plus c="#F0DEC0" s={11}/></button>
+                  </div>
+                </div>
+              )}
+              {taskTab==="history"&&(
+                <div>
+                  {!(panelTask.history?.length)&&<div style={{textAlign:"center",color:C.textLight,fontSize:11,padding:"28px 0",letterSpacing:1}}>NENHUMA ALTERAÇÃO REGISTRADA.</div>}
+                  <div style={{position:"relative"}}>
+                    {panelTask.history?.length>0&&<div style={{position:"absolute",left:10,top:4,bottom:4,width:"0.5px",background:C.border}}/>}
+                    {[...(panelTask.history||[])].reverse().map((h,i)=>(
+                      <div key={h.id} style={{display:"flex",gap:12,marginBottom:12,position:"relative"}}>
+                        <div style={{width:20,height:20,borderRadius:"50%",background:h.field==="created"?C.accentDim:C.surface,border:`0.5px solid ${h.field==="created"?C.accentLight:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,zIndex:1}}>
+                          {h.field==="created"
+                            ? <Ic.Plus c={C.accentLight} s={9}/>
+                            : <div style={{width:5,height:5,borderRadius:"50%",background:C.accentLight}}/>}
+                        </div>
+                        <div style={{flex:1,background:C.surface,borderRadius:3,padding:"8px 10px",border:`0.5px solid ${C.border}`}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:h.field==="created"?0:5}}>
+                            <span style={{fontSize:10,fontWeight:500,color:C.textPrimary}}>
+                              {h.field==="created" ? `Tarefa criada` : FIELD_LABELS[h.field]||h.field}
+                            </span>
+                            <span style={{fontSize:9,color:C.textLight,letterSpacing:.5}}>{h.ts}</span>
+                          </div>
+                          {h.field!=="created"&&(
+                            <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                              <span style={{fontSize:11,color:C.textMuted,textDecoration:"line-through"}}>{h.oldVal}</span>
+                              <span style={{fontSize:9,color:C.textLight}}>→</span>
+                              <span style={{fontSize:11,color:C.accentLight,fontWeight:500}}>{h.newVal}</span>
+                            </div>
+                          )}
+                          <div style={{fontSize:9,color:C.textLight,marginTop:4,letterSpacing:1}}>{h.author.toUpperCase()}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+                <>
+                  <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:14}}>
+                    {!(panelTask.comments?.length)&&<div style={{textAlign:"center",color:C.textLight,fontSize:11,padding:"20px 0",letterSpacing:1}}>NENHUM COMENTÁRIO AINDA.</div>}
+                    {(panelTask.comments||[]).map(c=>(
+                      <div key={c.id} style={{background:C.surface,borderRadius:3,padding:10,border:`0.5px solid ${C.border}`}}>
+                        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+                          <div style={{display:"flex",alignItems:"center",gap:7}}>
+                            <Avatar name={c.author} idx={members.indexOf(c.author)} size={22}/>
+                            <span style={{fontSize:11,fontWeight:500,color:C.textPrimary}}>{c.author}</span>
+                            <span style={{fontSize:9,color:C.textLight,letterSpacing:.5}}>{c.ts}</span>
+                          </div>
+                          <button onClick={()=>delComment(c.id)} style={{background:"none",border:"none",cursor:"pointer",padding:2}}><Ic.X c={C.textLight} s={10}/></button>
+                        </div>
+                        <div style={{fontSize:12,color:C.textMuted,lineHeight:1.5}}>{c.text}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{background:C.surface,borderRadius:3,padding:10,border:`0.5px solid ${C.border}`}}>
+                    <select value={commentAuthor} onChange={e=>setCommentAuthor(e.target.value)} style={{...inp,marginBottom:7,fontSize:11}}>
+                      <option value="">Anônimo</option>
+                      {members.map(m=><option key={m}>{m}</option>)}
+                    </select>
+                    <textarea value={commentText} onChange={e=>setCommentText(e.target.value)} placeholder="Escreva um comentário..." rows={3} style={{...inp,resize:"none",fontSize:12,lineHeight:1.5,marginBottom:7}} onKeyDown={e=>{ if(e.key==="Enter"&&(e.metaKey||e.ctrlKey)) addComment(); }}/>
+                    <button onClick={addComment} style={{...btn(true),width:"100%",justifyContent:"center",letterSpacing:1,fontSize:10}}><Ic.Send c="#F0DEC0" s={11}/>COMENTAR</button>
+                  </div>
+                </>
+              )}
+            </div>
+            <div style={{padding:"10px 18px",borderTop:`0.5px solid ${C.border}`,display:"flex",justifyContent:"flex-end",gap:8,background:C.card2,flexShrink:0}}>
+              <button style={btn(false)} onClick={()=>setPanel(null)}>Cancelar</button>
+              <button style={btn(true)} onClick={savePanel}><Ic.Check c="#F0DEC0" s={11}/>Salvar</button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* MODAL PROJETO */}
+      {modal==="project"&&(
+        <div style={{position:"fixed",inset:0,background:"rgba(8,4,0,.5)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:70}} onClick={()=>setModal(null)}>
+          <div style={{background:C.card,borderRadius:4,width:400,maxWidth:"92vw",border:`0.5px solid ${C.border}`,padding:22}} onClick={e=>e.stopPropagation()}>
+            <div style={{fontSize:9,fontWeight:500,color:C.accentLight,marginBottom:12,letterSpacing:2}}>EDITAR PROJETO</div>
+            <label style={{display:"block",fontSize:9,color:C.textMuted,marginBottom:4,letterSpacing:1}}>NOME</label>
+            <input style={{...inp,marginBottom:10}} value={modalForm.name||""} onChange={e=>setModalForm(f=>({...f,name:e.target.value}))}/>
+            <label style={{display:"block",fontSize:9,color:C.textMuted,marginBottom:4,letterSpacing:1}}>DESCRIÇÃO</label>
+            <textarea rows={3} style={{...inp,resize:"vertical",marginBottom:14}} value={modalForm.desc||""} onChange={e=>setModalForm(f=>({...f,desc:e.target.value}))}/>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><button style={btn(false)} onClick={()=>setModal(null)}>Cancelar</button><button style={btn(true)} onClick={saveProj}>Salvar</button></div>
+          </div>
+        </div>
+      )}
+
+      <Toast msg={toast} C={C}/>
+    </div>
+  );
+}
